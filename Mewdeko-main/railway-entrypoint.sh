@@ -43,7 +43,8 @@ cat > /app/credentials.json <<JSON
   "RedisConnections": "${REDIS}",
   "IsApiEnabled": false,
   "TotalShards": 1,
-  "IsMasterInstance": true
+  "IsMasterInstance": true,
+  "PostgresSetupCompleted": true
 }
 JSON
 
