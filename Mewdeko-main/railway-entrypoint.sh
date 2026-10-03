@@ -2,45 +2,43 @@
 set -e
 
 : "${TOKEN:?Imposta la variabile TOKEN con il token del bot}"
-
-# Pulisce il token: toglie virgolette, apici, backslash e spazi/a capo
+# Toglie virgolette, backslash e spazi dal token
 TOKEN="$(printf '%s' "$TOKEN" | tr -d "\"'\\\\[:space:]")"
+OWNER="$(printf '%s' "${OWNER_ID:-0}" | tr -dc '0-9')"; OWNER="${OWNER:-0}"
 
-# --- Postgres: da DATABASE_URL (postgresql://user:pass@host:port/db) ---
-if [ -n "$DATABASE_URL" ]; then
-  rest="${DATABASE_URL#*://}"
-  userpass="${rest%%@*}"
-  hostpart="${rest#*@}"
-  PGU="${userpass%%:*}"
-  PGP="${userpass#*:}"
-  hostport="${hostpart%%/*}"
-  PGD="${hostpart#*/}"; PGD="${PGD%%\?*}"
-  PGH="${hostport%%:*}"
-  PGPORT_="${hostport#*:}"
-  PSQL="Host=${PGH};Port=${PGPORT_};Database=${PGD};Username=${PGU};Password=${PGP}"
-else
-  PSQL="Host=${PGHOST};Port=${PGPORT:-5432};Database=${PGDATABASE};Username=${PGUSER};Password=${PGPASSWORD}"
+DATA_DIR="${DATA_DIR:-/data}"
+PGDATA="$DATA_DIR/postgres"
+REDIS_DIR="$DATA_DIR/redis"
+PGBIN="$(ls -d /usr/lib/postgresql/*/bin | sort -V | tail -1)"
+mkdir -p "$PGDATA" "$REDIS_DIR"
+chown -R postgres:postgres "$PGDATA"
+chmod 700 "$PGDATA"
+
+# --- PostgreSQL locale ---
+if [ ! -f "$PGDATA/PG_VERSION" ]; then
+  echo "[railway] Creo il database PostgreSQL..."
+  runuser -u postgres -- "$PGBIN/initdb" -D "$PGDATA" -U postgres --auth=trust -E UTF8
+fi
+runuser -u postgres -- "$PGBIN/pg_ctl" -D "$PGDATA" -w -t 60 \
+  -o "-c listen_addresses=127.0.0.1 -c unix_socket_directories=/tmp" \
+  -l /tmp/postgres.log start
+if ! runuser -u postgres -- "$PGBIN/psql" -h 127.0.0.1 -U postgres -tAc \
+     "SELECT 1 FROM pg_database WHERE datname='mewdeko'" | grep -q 1; then
+  runuser -u postgres -- "$PGBIN/createdb" -h 127.0.0.1 -U postgres mewdeko
 fi
 
-# --- Redis: da REDIS_URL (redis://default:pass@host:port) ---
-if [ -n "$REDIS_URL" ]; then
-  rest="${REDIS_URL#*://}"
-  userpass="${rest%%@*}"
-  hostport="${rest#*@}"
-  RP="${userpass#*:}"
-  REDIS="${hostport},password=${RP}"
-else
-  REDIS="${REDISHOST}:${REDISPORT:-6379},password=${REDISPASSWORD}"
-fi
+# --- Redis locale ---
+redis-server --daemonize yes --bind 127.0.0.1 --port 6379 \
+  --dir "$REDIS_DIR" --save 300 1 --appendonly no --logfile /tmp/redis.log
+for i in $(seq 1 30); do redis-cli -h 127.0.0.1 ping 2>/dev/null | grep -q PONG && break; sleep 1; done
 
-OWNER="${OWNER_ID:-0}"
-
+# --- credentials.json ---
 cat > /app/credentials.json <<JSON
 {
   "Token": "${TOKEN}",
   "OwnerIds": [${OWNER}],
-  "PsqlConnectionString": "${PSQL}",
-  "RedisConnections": "${REDIS}",
+  "PsqlConnectionString": "Host=127.0.0.1;Port=5432;Database=mewdeko;Username=postgres",
+  "RedisConnections": "127.0.0.1:6379",
   "IsApiEnabled": false,
   "TotalShards": 1,
   "IsMasterInstance": true,
@@ -48,4 +46,13 @@ cat > /app/credentials.json <<JSON
 }
 JSON
 
-exec dotnet Mewdeko.dll
+# --- avvio bot, con spegnimento pulito dei database ---
+dotnet Mewdeko.dll &
+BOT=$!
+trap 'kill -TERM $BOT 2>/dev/null' TERM INT
+wait $BOT || true
+wait $BOT 2>/dev/null
+CODE=$?
+redis-cli -h 127.0.0.1 shutdown save 2>/dev/null || true
+runuser -u postgres -- "$PGBIN/pg_ctl" -D "$PGDATA" -m fast stop 2>/dev/null || true
+exit $CODE
