@@ -3,6 +3,9 @@ set -e
 
 : "${TOKEN:?Imposta la variabile TOKEN con il token del bot}"
 
+# Pulisce il token: toglie virgolette, apici, backslash e spazi/a capo
+TOKEN="$(printf '%s' "$TOKEN" | tr -d "\"'\\\\[:space:]")"
+
 # --- Postgres: da DATABASE_URL (postgresql://user:pass@host:port/db) ---
 if [ -n "$DATABASE_URL" ]; then
   rest="${DATABASE_URL#*://}"
